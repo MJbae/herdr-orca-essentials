@@ -4,3 +4,5 @@ node_modules/
 gpui-kit.d.ts
 herdr.d.ts
 jsconfig.json
+__pycache__/
+*.pyc

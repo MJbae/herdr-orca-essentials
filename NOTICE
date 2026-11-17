@@ -10,6 +10,7 @@ project-tabs, project-files and project-changes mods are derived from
 Herdr's bundled spaces, tabs, files and changes mods at 0.1.16.
 Modifications add project opening, persistent project-root browsing,
 English controls, staging/unstaging, and staged-only commits.
-project-open and the additional action icons were created for this layout.
+project-open, project-usage, their Python helpers, and the additional action
+icons were created for this layout.
 
 Orca inspired the project workflow. This is an independent Herdr layout.

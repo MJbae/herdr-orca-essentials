@@ -111,7 +111,8 @@
                 "props": {
                   "panels": [
                     "files",
-                    "changes"
+                    "changes",
+                    "usage"
                   ],
                   "default_panel": "files"
                 }
@@ -181,6 +182,13 @@
                       "type": "block",
                       "content": {
                         "mod": "project-changes"
+                      }
+                    },
+                    {
+                      "id": "usage",
+                      "type": "block",
+                      "content": {
+                        "mod": "project-usage"
                       }
                     }
                   ]
