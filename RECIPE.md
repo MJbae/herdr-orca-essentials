@@ -1,6 +1,6 @@
 # Orca Essentials
 
-The essentials of Orca, in Herdr: a minimal workspace for switching projects, browsing files, and staging and committing changes beside your terminal. Use short English labels and small line icons. This is a community layout inspired by Orca.
+The essentials of Orca, in Herdr: a minimal workspace for switching projects, browsing files, and staging, committing, and pushing changes beside your terminal. Use short English labels and small line icons. This is a community layout inspired by Orca.
 
 ![Orca Essentials](preview.png)
 
@@ -10,7 +10,7 @@ A native three-column window. The 268 px left sidebar contains Herdr's 46 px bra
 
 The center has a 42 px tab bar and the active project's terminal panes. Panes have 30 px headers, 10 px rounded corners, and an accent border when focused. The body uses 8 px padding and gaps. A 28 px status bar sits below it.
 
-The right panel starts at 320 px and resizes from 280 to 900 px. **Files**, **Changes**, and **Usage** buttons select its contents. Files shows a folder tree or read-only preview. Changes shows file counts, staging controls, file rows, a diff, and a commit message field. Usage shows provider cards with used/remaining percentages, bars, reset times, and optional credits. Use the user's theme and fonts; UI text is mostly 12–13 px. Colors come from Herdr's theme tokens.
+The right panel starts at 320 px and resizes from 280 to 900 px. **Files**, **Changes**, and **Usage** buttons select its contents. Files shows a folder tree or read-only preview. Changes shows staging controls, file rows, a diff, and a commit message field, with a separate **Push** button below. Show the current branch, locally cached ahead/behind counts, and the push remote and target branch. Usage shows provider cards with used/remaining percentages, bars, reset times, and optional credits. Use the user's theme and fonts; UI text is mostly 12–13 px. Colors come from Herdr's theme tokens.
 
 ## How it behaves
 
@@ -19,7 +19,8 @@ The right panel starts at 320 px and resizes from 280 to 900 px. **Files**, **Ch
 - **Files** expands folders on demand. Clicking a file opens its preview; the back chevron returns to the tree. Anchor the tree to the project's folder. Remember expanded folders and previews while the mod lives.
 - Remember the selected right panel per project; new projects start with Files. Clicking the active panel button hides it.
 - **Stage All** stages all changes. Each row has **Stage** or **Unstage**; unstaging changes the index only. A check means staged; a half-filled circle means partially staged. Hover for explanations. Click a row to preview its diff.
-- **Commit** or Enter commits staged changes with the entered message. Disable it without a message or staged changes, while busy, or with unresolved conflicts. Show errors and completion messages. There is no push action.
+- **Commit** or Enter commits staged changes with the entered message. Disable it without a message or staged changes, while busy, or with unresolved conflicts. Show errors and completion messages.
+- **Push** sends committed history for the current branch to the displayed target; uncommitted edits stay local. Use the configured push remote/upstream or the only remote; offer a remote chooser if the target is ambiguous. Publishing a new branch sets tracking after a successful push. Disable Push with a clear reason when there is no remote, HEAD is detached, there are no commits, or an operation is busy.
 - **Usage** shows accounts on this computer, shared across projects and agents. Refresh on first opening, every five minutes while visible, or with **Refresh**. Show update time, stale data, and unavailable states; never replace missing data with zero. Keep credits in provider units and do not estimate remaining tokens. Claude's **Set Up Claude** explicitly installs its status-line connection while preserving any existing command.
 - Preserve native agent status: working uses a spinner, blocked uses a “Needs you” badge or `!`, done uses a filled dot, and idle uses an outlined dot. Tabs show a spinner or blocked/done dot; idle tabs have no status mark. Status colors follow the theme.
 
@@ -33,7 +34,7 @@ Six custom mods provide the behavior:
 - `project-open`: a 400 × 150 dialog that calls `pickFolder`, closes its overlay, then selects or creates a space.
 - `project-tabs`: native tabs plus panel toggles; props are `panels: ["files", "changes", "usage"]` and `default_panel: "files"`.
 - `project-files`: lazy file listing and a read-only `Editor` preview.
-- `project-changes`: status, diff, staging, and commit; `git.js` performs Git operations.
+- `project-changes`: status, diff, staging, commit, and push; `git.js` performs Git operations.
 - `project-usage`: usage cards; `collect.py` reads provider limits and `claude_usage.py` manages the optional Claude status-line connection. Bundle both Python helpers with the mod.
 
 Use `gpui-kit` / `gpui-base`, Herdr's `spaces`, `panes`, `focused`, `layout`, `theme`, `settings`, `run`, overlays, shared/local state, `exec`, `hc`, `readTextFile`, and `watchFolder`. Reuse shipped `workspace-chrome`, `agents`, `pane`, `workspace-status`, `menu`, `new-menu`, and `machine-add` mods and shipped icons. Bundle the custom SVG assets. The footer passes `{footer: true}` to `workspace-chrome`.
@@ -42,7 +43,9 @@ Use `gpui-kit` / `gpui-base`, Herdr's `spaces`, `panes`, `focused`, `layout`, `t
 
 Tested on macOS with Herdr 0.1.16 and Git. **⌘O** is a macOS binding; other platforms need key review and testing. The folder picker opens local projects. Existing remote spaces use Herdr's machine connection.
 
-The mods read project files, run `git` and `hc`, and list directories through `sh` or PowerShell. Git writes occur through staging and commit actions. Preserve literal path arguments, conflict checks, busy/context guards, and `checking()` guards. Files and Changes refresh through local watches plus 10-second polling. The displayed diff compares the working tree with HEAD; it is not a staged-only preview.
+The mods read project files, run `git` and `hc`, and list directories through `sh` or PowerShell. Git writes occur through staging, commit, and push actions. Preserve literal path arguments, conflict checks, busy/context guards, and `checking()` guards. Files and Changes refresh through local watches plus 10-second polling. The displayed diff compares the working tree with HEAD; it is not a staged-only preview.
+
+Push runs only on a click and sends one branch to the visible target. Never auto-push, fetch, pull, force-push, or include other branches or tags. Ahead/behind counts use local remote-tracking data and may be out of date; a push rejection must show an error rather than trigger a pull or force-push.
 
 Usage requires Python 3 and each provider's signed-in local CLI. Codex uses read-only app-server account methods with ChatGPT authentication; API-key accounts do not supply these limits. Antigravity requires stable `agy` 1.1.11 or newer and reads `/usage` in JSON print mode without starting an agent turn; this is documented in the [CLI changelog](https://antigravity.google/docs/changelog). Show Gemini and Claude + GPT five-hour/weekly windows and additional named model limits when supplied. Reject responses with positive `num_turns` or a nonempty `conversation_id`; zero turns and an empty conversation ID are normal for a successful usage response. Claude receives allowlisted limit fields from status-line input and stores them in a private local cache (mode `0600`); do not store the full input. Setup is a user action, not part of layout installation. Usage remains local even when a remote project is selected.
 
@@ -52,6 +55,6 @@ Install beside existing layouts and mods, resolving name collisions. Merge only 
 
 ## Done when
 
-Run `herdr-app check` on all six mods and `python3 -m unittest discover -s tests`, then try the layout in Herdr. Open two projects and verify switching and duplicate-folder reuse. Expand folders, preview a file, and return. In a disposable Git repository, stage all changes, unstage one file without losing edits, and commit the remainder. Confirm partially staged files, empty and non-Git states, conflicts, and project switching display correctly. Verify panel memory, icons, and readable labels at the default width.
+Run `herdr-app check` on all six mods, `python3 -m unittest discover -s tests`, and `node tests/test_git_push.mjs`, then try the layout in Herdr. Node is required only for the Git tests, not for the layout. Open two projects and verify switching and duplicate-folder reuse. Expand folders, preview a file, and return. In a disposable Git repository with a local bare remote, stage all changes, unstage one file without losing edits, commit the remainder, and push. Verify the remote receives committed history while unstaged edits remain local. Check new-branch tracking, remote selection, rejected pushes, and disabled states. Confirm partially staged files, empty and non-Git states, conflicts, and project switching display correctly. Verify panel memory, icons, and readable labels at the default width.
 
 Open Usage and verify available providers, manual refresh, percentages, reset times, and missing/stale states. Check that hidden panels do not poll and Antigravity setup states do not trigger automatic retries. Cover normal Antigravity responses with zero turns and an empty conversation ID, plus responses indicating an actual agent turn. Test Claude installation and command preservation in a temporary configuration. Keep account data out of published previews and fixtures.

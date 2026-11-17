@@ -2,7 +2,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, checking } from "herdr";
-import { parseStatus, stageAll, stageFile, unstageFile, commitStaged } from "./git.js";
+import { parseStatus, stageAll, stageFile, unstageFile, commitStaged, readPushState, pushBranch } from "./git.js";
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -37,6 +37,7 @@ export default class Changes extends View {
   init(_props, cx) {
     this.files = []; this.rows = []; this.diffWidth = 0; this.message = ""; this.handle = cx.focus_handle();
     this.summary = { total: 0, staged: 0, unstaged: 0, conflicts: 0 };
+    this.pushState = null; this.selectedRemote = null; this.remoteOpen = false;
     this.input = InputState.new({ placeholder: "Commit message" });
     this.input.on("change", (_e, cx) => {
       const hadMessage = Boolean(this.message.trim());
@@ -69,6 +70,7 @@ export default class Changes extends View {
     const { cwd, on } = location(), context = key();
     if (context !== this.context) {
       this.context = context; this.root = null; this.files = []; this.open = null;
+      this.pushState = null; this.selectedRemote = null; this.remoteOpen = false;
       this.summary = { total: 0, staged: 0, unstaged: 0, conflicts: 0 };
       this.setLines([]); this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.closed = false; this.limited = false;
     }
@@ -78,11 +80,14 @@ export default class Changes extends View {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
         if (key() !== context) return;
-        if (top.code !== 0) { this.root = null; this.files = []; this.setLines([]); this.open = null; this.error = "Not a Git repository"; return; }
+        if (top.code !== 0) { this.root = null; this.pushState = null; this.files = []; this.setLines([]); this.open = null; this.error = "Not a Git repository"; return; }
         const root = top.stdout.trim(), git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
-        const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
+        const [status, head, pushState] = await Promise.all([
+          git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]),
+          git(["rev-parse", "--verify", "HEAD"]),
+          readPushState(exec, root, on, this.selectedRemote).catch(() => ({ canPush: false, reason: "Cannot read branch status.", remotes: [] })),
+        ]);
         if (status.code !== 0) throw new Error(status.stderr);
-        const head = await git(["rev-parse", "--verify", "HEAD"]);
         const stats = {};
         const results = head.code === 0 ? [await git(["diff", "HEAD", "--numstat", "-z", "--no-renames"])] : [await git(["diff", "--cached", "--numstat", "-z", "--no-renames"]), await git(["diff", "--numstat", "-z", "--no-renames"])];
         for (const result of results) {
@@ -104,6 +109,7 @@ export default class Changes extends View {
         }
         if (key() !== context) return;
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.files = files; this.summary = state; this.limited = entries.length > 1000; this.error = null;
+        this.pushState = pushState;
         this.watch(root, cx);
         if (this.open && !files.some((f) => f.path === this.open)) { this.open = null; this.setLines([]); }
         // The first file's diff shows until you pick another.
@@ -202,6 +208,27 @@ export default class Changes extends View {
     cx.notify();
   }
 
+  chooseRemote(remote, cx) {
+    if (this.busy || this.loading || this.context !== key()) return;
+    this.selectedRemote = remote; this.remoteOpen = false; this.pushState = null; this.note = null;
+    this.refresh(cx); cx.notify();
+  }
+
+  push(cx) {
+    if (!this.root || !this.pushState?.canPush || this.busy || this.loading || this.context !== key()) return;
+    const root = this.root, on = this.on, context = this.context, expected = this.pushState;
+    this.busy = "push"; this.note = null; this.remoteOpen = false;
+    cx.spawn(async cx => {
+      try {
+        const result = await pushBranch(exec, root, on, expected);
+        if (key() === context) { this.note = result.message; this.noteError = false; }
+      } catch (error) {
+        if (key() === context) { this.note = `Could not push: ${error.message ?? error}`; this.noteError = true; }
+      } finally { this.busy = false; this.refresh(cx); cx.notify(); }
+    });
+    cx.notify();
+  }
+
   diffRow({ kind, number, text }, t) {
     if (kind === "@") return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
     return h_flex().w_full().h(20).flex_none().gap(10).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
@@ -215,6 +242,12 @@ export default class Changes extends View {
     const ready = Boolean(this.root && !this.busy && !this.loading && this.context === key());
     const enabled = Boolean(ready && this.message.trim() && this.summary.staged && !this.summary.conflicts);
     const canStage = Boolean(ready && this.summary.unstaged && !this.summary.conflicts);
+    const pushState = this.pushState, canPush = Boolean(ready && pushState?.canPush);
+    const remoteChoices = pushState?.remotes ?? [];
+    const canChooseRemote = remoteChoices.length > 1 || (remoteChoices.length > 0 && !remoteChoices.includes(pushState?.remote));
+    const destination = pushState?.remote && pushState?.target ? `${pushState.remote}/${pushState.target}` : null;
+    const branchLabel = pushState?.branch ?? (this.root ? pushState ? "Detached HEAD" : "Checking branch…" : "No project");
+    const pushHint = pushState?.canPush && destination ? `Push committed changes to ${destination}. Uncommitted edits stay here.` : pushState?.reason || "Checking push destination…";
     return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "escape" && this.typing) { this.typing = false; this.handle.focus(); cx.stop_propagation(); cx.notify(); }
@@ -267,6 +300,31 @@ export default class Changes extends View {
           .tooltip("Commit staged changes · Enter")
           .when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx))
           .child(svg(this.busy === "commit" ? "mods/workspace-chrome/spinner.svg" : "mods/project-changes/commit.svg").size(14).flex_none().when(this.busy === "commit", el => el.spin(900)))
-          .child(this.busy === "commit" ? "Committing…" : "Commit")));
+          .child(this.busy === "commit" ? "Committing…" : "Commit")))
+      .child(v_flex().flex_none().px(10).pb(10).gap(7)
+        .child(h_flex().gap(6).items_center().text_size(11).text_color(t.muted)
+          .child(svg("mods/project-changes/branch.svg").size(13).flex_none())
+          .child(div().flex_1().min_w(0).truncate().tooltip(destination ? `${branchLabel} → ${destination}` : branchLabel).child(branchLabel))
+          .when(pushState?.ahead !== null && pushState?.ahead !== undefined, el => el.child(div().flex_none()
+            .tooltip("Commits ahead / behind the locally cached remote branch")
+            .child(`↑${pushState.ahead} ↓${pushState.behind ?? 0}`))))
+        .child(h_flex().gap(8).items_center()
+          .child(h_flex().id("push-remote").flex_1().min_w(0).h(28).px(6).gap(4).items_center().rounded(5).text_size(11).text_color(t.muted)
+            .tooltip(destination ? `Push destination: ${destination}${pushState?.publish ? " · sets upstream" : ""}` : pushHint)
+            .when(ready && canChooseRemote, el => el.cursor_pointer().hover(s => s.bg(t.hover)))
+            .on_click((_e, cx) => { if (ready && canChooseRemote) { this.remoteOpen = !this.remoteOpen; cx.notify(); } })
+            .child(div().flex_1().min_w(0).truncate().child(destination ?? (!pushState && this.root ? "Checking…" : remoteChoices.length ? "Choose remote" : "No remote")))
+            .when(canChooseRemote, el => el.child(svg("mods/project-changes/chevron-down.svg").size(12).flex_none())))
+          .child(h_flex().id("push").h(30).px(10).gap(5).flex_none().items_center().rounded(7)
+            .bg(canPush ? t.solid : t.raised).text_color(canPush ? t.solid_foreground : t.dim).text_size(12).tooltip(pushHint)
+            .when(canPush, el => el.cursor_pointer().hover(s => s.opacity(0.88)))
+            .on_click((_e, cx) => this.push(cx))
+            .child(svg(this.busy === "push" ? "mods/workspace-chrome/spinner.svg" : "mods/project-changes/push.svg").size(14).flex_none().when(this.busy === "push", el => el.spin(900)))
+            .child(this.busy === "push" ? "Pushing…" : "Push")))
+        .when(this.remoteOpen && canChooseRemote, el => el.child(v_flex().gap(2).p(4).rounded(6).bg(t.raised)
+          .children(remoteChoices.map(remote => div().id(`push-remote-${remote}`).px(8).py(5).rounded(4).text_size(11)
+            .text_color(remote === pushState.remote ? t.foreground : t.muted).cursor_pointer().hover(s => s.bg(t.hover))
+            .on_click((_e, cx) => this.chooseRemote(remote, cx)).child(remote)))))
+        .when(Boolean(this.root && pushState?.reason), el => el.child(div().text_size(10.5).text_color(t.dim).child(pushState.reason))));
   }
 }

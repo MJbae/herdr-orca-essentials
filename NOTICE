@@ -9,7 +9,8 @@ The base layout is derived from Herdr main 0.1.12. The project-spaces,
 project-tabs, project-files and project-changes mods are derived from
 Herdr's bundled spaces, tabs, files and changes mods at 0.1.16.
 Modifications add project opening, persistent project-root browsing,
-English controls, staging/unstaging, and staged-only commits.
+English controls, staging/unstaging, staged-only commits, and single-branch
+push with visible target selection.
 project-open, project-usage, their Python helpers, and the additional action
 icons were created for this layout.
 
