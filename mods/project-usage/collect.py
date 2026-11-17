@@ -2,6 +2,7 @@
 """Read provider quotas without starting a model turn or exposing account data."""
 
 import argparse
+from contextlib import contextmanager
 import datetime
 import json
 import math
@@ -18,9 +19,8 @@ import time
 
 MAX_OUTPUT = 512 * 1024
 MIN_AGY_VERSION = (1, 1, 11)
-# A minimum version alone does not guarantee that /usage is a read-only command.
-# Keep probes disabled until a specific release has been positively verified.
-VERIFIED_AGY_VERSIONS = frozenset()
+AGY_GUARD_REVISION = 2
+AGY_RETRY_DELAY = 300
 
 
 class UsageError(Exception):
@@ -29,6 +29,14 @@ class UsageError(Exception):
 
 class UnsupportedUsage(UsageError):
     """The CLI appears to have treated /usage as a conversation."""
+
+
+class ProcessFailure(UsageError):
+    """Retain bounded stdout privately so failures cannot hide conversation markers."""
+
+    def __init__(self, output):
+        super().__init__()
+        self.output = output
 
 
 def result(provider, status, message=None, source=None):
@@ -157,25 +165,43 @@ def antigravity_guard_path():
     return base / "orca-essentials" / "antigravity-usage-guard.json"
 
 
-def antigravity_version_blocked(version):
+def antigravity_guard_reason(version, now=None):
     try:
         with antigravity_guard_path().open("r", encoding="utf-8") as stream:
             value = json.loads(stream.read(4096))
-        return isinstance(value, dict) and value.get("blocked") is True and value.get("version") == list(version)
+        if not isinstance(value, dict) or value.get("blocked") is not True or value.get("version") != list(version):
+            return None
+        # Legacy guards mistook the CLI's empty conversation_id field for a turn.
+        if value.get("revision") in (None, 1):
+            return None
+        reason = value.get("reason")
+        if value.get("revision") == AGY_GUARD_REVISION and reason == "probe":
+            retry_after = timestamp(value.get("retry_after"))
+            if retry_after is not None and retry_after <= (time.time() if now is None else now):
+                return None
+            return "probe"
+        return "conversation"
     except (OSError, ValueError):
-        return False
+        return None
 
 
-def block_antigravity_version(version):
+def antigravity_version_blocked(version, now=None):
+    return antigravity_guard_reason(version, now) is not None
+
+
+def block_antigravity_version(version, reason="conversation", now=None):
     # Do not repeat a prompt-like command on subsequent polls or application reloads.
     # This cache contains only a CLI version, never the response or any account data.
     path = antigravity_guard_path()
     temporary = None
+    value = {"revision": AGY_GUARD_REVISION, "version": list(version), "blocked": True, "reason": reason}
+    if reason == "probe":
+        value["retry_after"] = int(time.time() if now is None else now) + AGY_RETRY_DELAY
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with tempfile.NamedTemporaryFile("w", dir=str(path.parent), encoding="utf-8", delete=False) as stream:
             temporary = stream.name
-            json.dump({"version": list(version), "blocked": True}, stream)
+            json.dump(value, stream)
         os.replace(temporary, path)
         return True
     except OSError:
@@ -198,16 +224,32 @@ def clear_antigravity_version(version):
 
 def prompt_payload(value):
     if isinstance(value, dict):
-        if "conversation_id" in value:
+        conversation = value.get("conversation_id")
+        if conversation is not None and conversation != "":
             return True
         turns = value.get("num_turns")
-        if turns is not None and (number(turns) is None or turns > 0):
+        if turns is not None and (number(turns) is None or turns != 0):
             return True
         return any(prompt_payload(item) for item in value.values())
     return isinstance(value, list) and any(prompt_payload(item) for item in value)
 
 
-def parse_antigravity(text, now=None):
+def antigravity_group_name(value):
+    name = display_name(value, "")
+    aliases = {"gemini models": "Gemini", "claude and gpt models": "Claude + GPT"}
+    return aliases.get(" ".join(name.lower().split()), name)
+
+
+def generic_bucket_name(name, group_name):
+    remainder = name.casefold()
+    if remainder.startswith(group_name.casefold()):
+        remainder = remainder[len(group_name):]
+    words = re.findall(r"[a-z0-9]+", remainder)
+    return all(word in {"weekly", "week", "five", "hour", "hours", "5h", "5", "limit", "remaining", "quota"}
+               for word in words)
+
+
+def antigravity_records(text):
     records = []
     for line in text.splitlines():
         if not line.strip():
@@ -215,10 +257,17 @@ def parse_antigravity(text, now=None):
         try:
             record = json.loads(line)
         except (ValueError, RecursionError):
-            raise UsageError() from None
+            # Some releases print banners alongside NDJSON. A valid usage record
+            # is still required below; banner/error text is never returned.
+            continue
         if prompt_payload(record):
             raise UnsupportedUsage()
         records.append(record)
+    return records
+
+
+def parse_antigravity(text, now=None):
+    records = antigravity_records(text)
     value = result("antigravity", "ok", source="Antigravity /usage")
     found_usage = False
     seen = set()
@@ -249,12 +298,18 @@ def parse_antigravity(text, now=None):
                 if remaining is None or not 0 <= remaining <= 1:
                     continue
                 name = display_name(bucket.get("name"), "Quota {}".format(bucket_index + 1))
-                group_name = display_name(group.get("name"), "")
-                if len(name_groups.get(bucket.get("name"), ())) > 1 and not group_name:
+                group_name = antigravity_group_name(group.get("name"))
+                original_name = bucket.get("name") if isinstance(bucket.get("name"), str) else ""
+                if len(name_groups.get(original_name, ())) > 1 and not group_name:
                     group_name = "Group {}".format(group_index + 1)
-                if group_name and group_name.casefold() not in name.casefold():
+                cadence = bucket.get("window") if isinstance(bucket.get("window"), str) else ""
+                label = {"5h": "5h", "weekly": "Weekly"}.get(cadence, "")
+                same_cadence = sum(isinstance(item, dict) and item.get("window") == cadence and not item.get("disabled")
+                                   for item in group["buckets"])
+                if group_name and label and same_cadence == 1 and generic_bucket_name(name, group_name):
+                    name = group_name
+                elif group_name and group_name.casefold() not in name.casefold():
                     name = "{} · {}".format(group_name, name)
-                label = {"5h": "5h", "weekly": "Weekly"}.get(bucket.get("window"), "")
                 reset = reset_time(bucket.get("reset_time"))
                 identity = (group_index, bucket.get("id") if isinstance(bucket.get("id"), str) else bucket_index, label)
                 if identity in seen:
@@ -272,6 +327,20 @@ def parse_antigravity(text, now=None):
         return result("antigravity", "unavailable", "No quota data is available for this account.", value["source"])
     value["updated_at"] = int(time.time() if now is None else now)
     return value
+
+
+@contextmanager
+def antigravity_usage_environment(base):
+    # Usage polling must never open a browser for interactive sign-in.
+    with tempfile.TemporaryDirectory(prefix="orca-usage-browser-") as directory:
+        for name in ("open", "xdg-open"):
+            path = Path(directory) / name
+            path.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            path.chmod(0o700)
+        env = dict(base)
+        env["BROWSER"] = str(Path(directory) / "open")
+        env["PATH"] = directory + os.pathsep + base.get("PATH", os.defpath)
+        yield env
 
 
 class BoundedProcess:
@@ -351,17 +420,18 @@ class BoundedProcess:
 
     def read_all(self):
         lines = []
-        while True:
-            line = self.read_line()
-            if line is None:
-                break
-            lines.append(line)
         try:
+            while True:
+                line = self.read_line()
+                if line is None:
+                    break
+                lines.append(line)
             code = self.process.wait(timeout=max(0.01, self.deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            raise UsageError() from None
+        except (UsageError, OSError, subprocess.TimeoutExpired):
+            captured = lines + ([self.buffer.decode("utf-8", errors="replace")] if self.buffer else [])
+            raise ProcessFailure("\n".join(captured)) from None
         if code:
-            raise UsageError()
+            raise ProcessFailure("\n".join(lines))
         return "\n".join(lines)
 
     def rpc(self, request_id, method, params):
@@ -403,28 +473,36 @@ def collect_antigravity():
     executable = shutil.which("agy")
     if executable is None:
         return result("antigravity", "unavailable", "Antigravity CLI is not installed.")
-    if not VERIFIED_AGY_VERSIONS:
-        return result("antigravity", "unavailable", "Usage is not supported by this Antigravity CLI.")
     env = dict(os.environ, AGY_CLI_DISABLE_AUTO_UPDATE="true")
     deadline = time.monotonic() + 27
     try:
         with BoundedProcess([executable, "--version"], min(deadline, time.monotonic() + 4), env) as process:
             version = parse_agy_version(process.read_all())
         if version is None or version < MIN_AGY_VERSION:
+            return result("antigravity", "setup", "Antigravity CLI 1.1.11 or newer is required.")
+        guard_reason = antigravity_guard_reason(version)
+        if guard_reason == "probe":
+            return result("antigravity", "error", "Usage check is paused. Retry in a few minutes.")
+        if guard_reason:
             return result("antigravity", "setup", "Usage is not supported by this Antigravity CLI.")
-        if version not in VERIFIED_AGY_VERSIONS:
-            return result("antigravity", "unavailable", "Usage is not supported by this Antigravity CLI.")
-        if antigravity_version_blocked(version):
-            return result("antigravity", "setup", "Usage is not supported by this Antigravity CLI.")
-        # Persist before the command: even a timeout, malformed output or nonzero exit
-        # may conceal a conversation. Only an accepted usage payload clears this.
-        if not block_antigravity_version(version):
+        # Persist before the command. Uncertain failures pause retries for five
+        # minutes; a confirmed conversation blocks this CLI version indefinitely.
+        if not block_antigravity_version(version, reason="probe"):
             return result("antigravity", "setup", "Could not save the usage safety check. Check cache permissions.")
-        with BoundedProcess([executable, "-p", "/usage", "--output-format", "json", "--print-timeout", "20s"], deadline, env) as process:
-            value = parse_antigravity(process.read_all())
+        with antigravity_usage_environment(env) as usage_env:
+            with BoundedProcess([executable, "-p", "/usage", "--output-format", "json", "--print-timeout", "20s"], deadline, usage_env) as process:
+                try:
+                    output = process.read_all()
+                except ProcessFailure as failure:
+                    # A failed command can still reveal a real model conversation.
+                    # Inspect only for that marker; never accept failed-run quotas.
+                    antigravity_records(failure.output)
+                    raise
+                value = parse_antigravity(output)
         clear_antigravity_version(version)
         return value
     except UnsupportedUsage:
+        block_antigravity_version(version)
         return result("antigravity", "setup", "Usage is not supported by this Antigravity CLI.")
     except (UsageError, OSError, ValueError, subprocess.SubprocessError):
         return result("antigravity", "error", "Could not read Antigravity usage. Check your CLI sign-in and retry.")

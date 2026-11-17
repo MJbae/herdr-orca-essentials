@@ -27,9 +27,9 @@ Tested with **Herdr 0.1.16 on macOS**. Requires Git; other platforms are unteste
 
 [Preview the Usage panel with sample data](usage.png).
 
-Requires Python 3 and the signed-in CLI on this computer: **Codex** with a ChatGPT account or **Claude Code**. For Claude, click **Set Up Claude** to connect its status line, then send a message in Claude. Any existing status-line command is preserved.
+Requires Python 3 and the signed-in CLI on this computer: **Codex** with a ChatGPT account, **Antigravity** (`agy` 1.1.11 or newer), or **Claude Code**. For Claude, click **Set Up Claude** to connect its status line, then send a message in Claude. Any existing status-line command is preserved.
 
-Antigravity currently shows **Unavailable**. Its installed CLI did not return a supported usage response; unverified versions are never queried for usage.
+Antigravity shows Gemini and Claude + GPT limits for five-hour and weekly windows, plus model-specific limits when available. It uses the read-only `/usage` command supported since [Antigravity CLI 1.1.11](https://antigravity.google/docs/changelog).
 
 Usage refreshes every five minutes while visible, or with **Refresh**. Missing or old data is marked explicitly. Credits keep their provider's units; remaining tokens are not estimated. Remote projects still show this computer's accounts.
 

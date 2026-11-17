@@ -17,7 +17,8 @@ SPEC.loader.exec_module(collector)
 
 
 def usage_record(buckets):
-    return {"status": "SUCCESS", "command": {"name": "usage", "data": {"groups": [{"buckets": buckets}]}}}
+    return {"status": "SUCCESS", "conversation_id": "", "num_turns": 0,
+            "command": {"name": "usage", "data": {"groups": [{"buckets": buckets}]}}}
 
 
 class CodexParsingTests(unittest.TestCase):
@@ -92,6 +93,49 @@ class AntigravityParsingTests(unittest.TestCase):
         value = collector.parse_antigravity(json.dumps(record))
         self.assertEqual([w["label"] for w in value["windows"]], ["Gemini · Pro · 5h", "Claude · Pro · 5h"])
 
+    def test_named_model_is_preserved_when_it_is_the_only_group_bucket(self):
+        record = {"status": "SUCCESS", "command": {"name": "usage", "data": {"groups": [
+            {"name": "Gemini Models", "buckets": [{"name": "Gemini 4 Argon", "remaining_fraction": 0.5, "window": "weekly"}]},
+        ]}}}
+        value = collector.parse_antigravity(json.dumps(record))
+        self.assertEqual(value["windows"][0]["label"], "Gemini 4 Argon · Weekly")
+
+    def test_real_usage_envelope_with_synthetic_quota_values(self):
+        def bucket(name, cadence, remaining):
+            return {"id": "private-bucket", "name": name, "window": cadence,
+                    "remaining_fraction": remaining, "reset_time": "2026-11-17T00:00:00Z"}
+        record = {"status": "SUCCESS", "conversation_id": "", "num_turns": 0,
+                  "command": {"name": "usage", "data": {"groups": [
+                      {"name": "Gemini Models", "buckets": [bucket("Weekly Limit Remaining", "weekly", 0.8), bucket("Five Hour Limit Remaining", "5h", 0.5)]},
+                      {"name": "Claude and GPT models", "buckets": [bucket("Weekly Limit Remaining", "weekly", 0.6), bucket("Five Hour Limit Remaining", "5h", 0.3)]},
+                      {"name": "Gemini 4 Argon", "buckets": [bucket("Gemini 4 Argon Weekly Limit", "weekly", 1)]},
+                  ]}}}
+        value = collector.parse_antigravity(json.dumps(record))
+        self.assertEqual(value["status"], "ok")
+        self.assertEqual([w["label"] for w in value["windows"]], ["Gemini · Weekly", "Gemini · 5h", "Claude + GPT · Weekly", "Claude + GPT · 5h", "Gemini 4 Argon · Weekly"])
+        self.assertEqual([w["used_percent"] for w in value["windows"]], [20, 50, 40, 70, 0])
+        self.assertNotIn("private-bucket", json.dumps(value))
+
+    def test_empty_and_null_conversation_fields_are_not_model_turns(self):
+        for conversation_id in ("", None):
+            for turns in (0, None):
+                record = usage_record([{"name": "Model", "remaining_fraction": 0.5}])
+                record.update(conversation_id=conversation_id, num_turns=turns)
+                self.assertEqual(collector.parse_antigravity(json.dumps(record))["status"], "ok")
+
+    def test_banners_are_ignored_only_when_valid_quota_exists(self):
+        text = "Antigravity update notice\n{incomplete banner\n" + json.dumps(usage_record([{"name": "Model", "remaining_fraction": 0.5}]))
+        self.assertEqual(collector.parse_antigravity(text)["status"], "ok")
+        with self.assertRaises(collector.UsageError):
+            collector.parse_antigravity("Antigravity update notice\n{incomplete banner\n")
+
+    def test_missing_usage_data_never_becomes_zero_usage(self):
+        for data in (None, {}, {"groups": None}, {"groups": [None]}, {"groups": [{"buckets": None}]}):
+            record = usage_record([])
+            record["command"]["data"] = data
+            with self.assertRaises(collector.UsageError):
+                collector.parse_antigravity(json.dumps(record))
+
     def test_malformed_or_wrong_command_is_rejected(self):
         for text in ("", "{broken", "provider error includes secret", '{"status":"SUCCESS","command":{"name":"chat"}}', '{"status":"SUCCESS","command":{"name":"usage","data":null}}'):
             with self.assertRaises(collector.UsageError):
@@ -99,7 +143,7 @@ class AntigravityParsingTests(unittest.TestCase):
 
     def test_conversation_records_rejected_even_after_valid_usage(self):
         valid = json.dumps(usage_record([{"name": "Model", "remaining_fraction": 0.5}]))
-        for conversation in ({"num_turns": 1}, {"conversation_id": "private-session"}, {"result": {"num_turns": 2}}, {"num_turns": "1"}, {"conversation_id": None}):
+        for conversation in ({"num_turns": 1}, {"conversation_id": "private-session"}, {"result": {"num_turns": 2}}, {"num_turns": "1"}):
             with self.assertRaises(collector.UnsupportedUsage):
                 collector.parse_antigravity(valid + "\n" + json.dumps(conversation))
         self.assertEqual(collector.parse_antigravity(valid + '\n{"num_turns":0}')["status"], "ok")
@@ -119,10 +163,6 @@ class CommandSafetyTests(unittest.TestCase):
         patcher = mock.patch.object(collector, "antigravity_guard_path", return_value=self.guard)
         patcher.start()
         self.addCleanup(patcher.stop)
-        # Exercise the dormant adapter only with a synthetic test allowlist.
-        verified = mock.patch.object(collector, "VERIFIED_AGY_VERSIONS", frozenset({(1, 5, 10)}))
-        verified.start()
-        self.addCleanup(verified.stop)
 
     def test_missing_clis_do_not_start_processes(self):
         with mock.patch.object(collector.shutil, "which", return_value=None), mock.patch.object(collector, "BoundedProcess") as process:
@@ -130,16 +170,12 @@ class CommandSafetyTests(unittest.TestCase):
             self.assertEqual(collector.collect_antigravity()["status"], "unavailable")
             process.assert_not_called()
 
-    def test_no_verified_agy_release_never_launches_cli(self):
-        with mock.patch.object(collector, "VERIFIED_AGY_VERSIONS", frozenset()), mock.patch.object(collector.shutil, "which", return_value="/cli/agy"), mock.patch.object(collector, "BoundedProcess") as factory:
-            self.assertEqual(collector.collect_antigravity()["status"], "unavailable")
-            factory.assert_not_called()
-
-    def test_unknown_new_agy_release_does_not_run_usage(self):
-        with mock.patch.object(collector.shutil, "which", return_value="/cli/agy"), mock.patch.object(collector, "BoundedProcess") as factory:
-            factory.return_value.__enter__.return_value.read_all.return_value = "1.6.0"
-            self.assertEqual(collector.collect_antigravity()["status"], "unavailable")
-            self.assertEqual(factory.call_count, 1)
+    def test_supported_stable_versions_use_the_read_only_usage_command(self):
+        for version in ("1.1.11", "1.5.10", "1.6.0"):
+            with mock.patch.object(collector.shutil, "which", return_value="/cli/agy"), mock.patch.object(collector, "BoundedProcess") as factory:
+                factory.return_value.__enter__.return_value.read_all.side_effect = [version, json.dumps(usage_record([{"name": "Model", "remaining_fraction": 0.5}]))]
+                self.assertEqual(collector.collect_antigravity()["status"], "ok")
+                self.assertEqual(factory.call_count, 2)
 
     def test_codex_uses_only_account_rpc_and_never_refreshes_token(self):
         with mock.patch.object(collector.shutil, "which", return_value="/cli/codex"), mock.patch.object(collector, "BoundedProcess") as factory:
@@ -176,12 +212,40 @@ class CommandSafetyTests(unittest.TestCase):
             self.assertFalse(self.guard.exists())
 
     def test_agy_uncertain_response_keeps_probe_latch(self):
-        for response in (collector.UsageError("nonzero or timeout"), "{malformed\n" + '{"num_turns":1}'):
+        for response in (collector.UsageError("nonzero or timeout"), "{malformed"):
             with mock.patch.object(collector.shutil, "which", return_value="/cli/agy"), mock.patch.object(collector, "BoundedProcess") as factory:
                 self.guard.unlink(missing_ok=True)
                 factory.return_value.__enter__.return_value.read_all.side_effect = ["1.5.10", response]
                 self.assertEqual(collector.collect_antigravity()["status"], "error")
                 self.assertTrue(collector.antigravity_version_blocked((1, 5, 10)))
+                self.assertEqual(collector.antigravity_guard_reason((1, 5, 10)), "probe")
+
+    def test_transient_failure_pause_expires_and_remains_retryable(self):
+        collector.block_antigravity_version((1, 5, 10), reason="probe", now=1000)
+        self.assertTrue(collector.antigravity_version_blocked((1, 5, 10), now=1299))
+        self.assertFalse(collector.antigravity_version_blocked((1, 5, 10), now=1300))
+        with mock.patch.object(collector.time, "time", return_value=1100), mock.patch.object(collector.shutil, "which", return_value="/cli/agy"), mock.patch.object(collector, "BoundedProcess") as factory:
+            factory.return_value.__enter__.return_value.read_all.return_value = "1.5.10"
+            self.assertEqual(collector.collect_antigravity()["status"], "error")
+            self.assertEqual(factory.call_count, 1)
+
+    def test_legacy_false_positive_guard_migrates_after_success(self):
+        self.guard.write_text(json.dumps({"version": [1, 5, 10], "blocked": True}))
+        self.assertFalse(collector.antigravity_version_blocked((1, 5, 10)))
+        with mock.patch.object(collector.shutil, "which", return_value="/cli/agy"), mock.patch.object(collector, "BoundedProcess") as factory:
+            factory.return_value.__enter__.return_value.read_all.side_effect = ["1.5.10", json.dumps(usage_record([{"name": "Model", "remaining_fraction": 0.5}]))]
+            self.assertEqual(collector.collect_antigravity()["status"], "ok")
+        self.assertFalse(self.guard.exists())
+
+    def test_usage_polling_suppresses_browser_launch(self):
+        with collector.antigravity_usage_environment({"PATH": "/usr/bin"}) as env:
+            guard_directory = Path(env["BROWSER"]).parent
+            self.assertEqual(env["PATH"].split(collector.os.pathsep)[0], str(guard_directory))
+            for name in ("open", "xdg-open"):
+                guard = guard_directory / name
+                self.assertEqual(guard.read_text(), "#!/bin/sh\nexit 1\n")
+                self.assertEqual(guard.stat().st_mode & 0o777, 0o700)
+        self.assertFalse(guard_directory.exists())
 
     def test_agy_probe_is_persisted_before_command_and_clear_after_valid_empty_usage(self):
         with mock.patch.object(collector.shutil, "which", return_value="/cli/agy"), mock.patch.object(collector, "BoundedProcess") as factory:
@@ -212,8 +276,41 @@ class CommandSafetyTests(unittest.TestCase):
             value = collector.collect_antigravity()
             self.assertEqual(value["status"], "setup")
             self.assertNotIn("private", json.dumps(value))
-            self.assertEqual(json.loads(self.guard.read_text()), {"version": [1, 5, 10], "blocked": True})
+            self.assertEqual(json.loads(self.guard.read_text()), {"revision": 2, "version": [1, 5, 10], "blocked": True, "reason": "conversation"})
             self.assertEqual(self.guard.stat().st_mode & 0o777, 0o600)
+
+    def test_prompt_marker_after_malformed_banner_is_still_permanently_blocked(self):
+        with mock.patch.object(collector.shutil, "which", return_value="/cli/agy"), mock.patch.object(collector, "BoundedProcess") as factory:
+            factory.return_value.__enter__.return_value.read_all.side_effect = ["1.5.10", 'banner\n{malformed\n{"num_turns":1}']
+            self.assertEqual(collector.collect_antigravity()["status"], "setup")
+            self.assertEqual(collector.antigravity_guard_reason((1, 5, 10)), "conversation")
+
+    def test_nonzero_cli_with_conversation_output_is_permanently_blocked(self):
+        executable = self.guard.parent / "fake-agy"
+        executable.write_text("#!" + sys.executable + "\nimport sys\n"
+                              "if '--version' in sys.argv:\n    print('1.5.10')\n"
+                              "else:\n    print('{\"num_turns\":1,\"conversation_id\":\"private-session\"}')\n    sys.exit(1)\n")
+        executable.chmod(0o700)
+        with mock.patch.object(collector.shutil, "which", return_value=str(executable)):
+            value = collector.collect_antigravity()
+        self.assertEqual(value["status"], "setup")
+        self.assertEqual(collector.antigravity_guard_reason((1, 5, 10)), "conversation")
+        self.assertNotIn("private-session", json.dumps(value))
+
+    def test_nonzero_cli_with_valid_quota_is_not_accepted(self):
+        with mock.patch.object(collector.shutil, "which", return_value="/cli/agy"), mock.patch.object(collector, "BoundedProcess") as factory:
+            factory.return_value.__enter__.return_value.read_all.side_effect = ["1.5.10", collector.ProcessFailure(json.dumps(usage_record([{"name": "Model", "remaining_fraction": 0.5}])))]
+            value = collector.collect_antigravity()
+            self.assertEqual(value["status"], "error")
+            self.assertEqual(value["windows"], [])
+            self.assertEqual(collector.antigravity_guard_reason((1, 5, 10)), "probe")
+
+    def test_timed_out_process_preserves_bounded_conversation_output(self):
+        with self.assertRaises(collector.ProcessFailure) as failure:
+            with collector.BoundedProcess([sys.executable, "-c", 'import time; print(\'{"num_turns":1}\', flush=True); time.sleep(20)'], time.monotonic() + 0.2) as process:
+                process.read_all()
+        with self.assertRaises(collector.UnsupportedUsage):
+            collector.antigravity_records(failure.exception.output)
 
     def test_blocked_agy_version_never_runs_usage_again(self):
         collector.block_antigravity_version((1, 5, 10))
