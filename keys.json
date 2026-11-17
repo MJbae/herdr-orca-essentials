@@ -1,0 +1,5 @@
+{
+  "layout:orca-essentials": {
+    "cmd-o": "mod.open:project-open"
+  }
+}

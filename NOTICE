@@ -1,0 +1,15 @@
+Orca Essentials
+Copyright 2026 MJbae
+
+This project includes modified layout and mod files from Herdr:
+https://github.com/herdrdev/herdr-app
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The base layout is derived from Herdr main 0.1.12. The project-spaces,
+project-tabs, project-files and project-changes mods are derived from
+Herdr's bundled spaces, tabs, files and changes mods at 0.1.16.
+Modifications add project opening, persistent project-root browsing,
+English controls, staging/unstaging, and staged-only commits.
+project-open and the additional action icons were created for this layout.
+
+Orca inspired the project workflow. This is an independent Herdr layout.
